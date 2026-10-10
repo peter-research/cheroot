@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 import urllib.parse  # noqa: WPS301
 import uuid
@@ -20,7 +21,7 @@ import requests_unixsocket
 from pypytools.gc.custom import DefaultGc
 
 from .._compat import IS_LINUX, IS_MACOS, IS_WINDOWS, SYS_PLATFORM, bton, ntob
-from ..server import IS_UID_GID_RESOLVABLE, Gateway, HTTPServer
+from ..server import IS_UID_GID_RESOLVABLE, Gateway, HTTPServer, HTTPRequest
 from ..testing import (
     ANY_INTERFACE_IPV4,
     ANY_INTERFACE_IPV6,
@@ -626,3 +627,50 @@ def test_overload_thread_does_not_leak():
     # We use special exit code to indicate success, rather than normal zero, so
     # the test doesn't acidentally pass:
     assert process.returncode == SUCCESSFUL_SUBPROCESS_EXIT
+
+
+def test_unservicable_exception_is_logged(request, monkeypatch, capsys):
+    """Exceptions while sending 503 are logged via HTTPServer.error_log.
+
+    Covers the exception handler in HTTPServer._serve_unservicable.
+    See issue #797.
+    """
+    localhost = '127.0.0.1'
+    httpserver = HTTPServer(
+        bind_addr=(localhost, EPHEMERAL_PORT),
+        gateway=Gateway,
+    )
+    httpserver.requests = ThreadPool(
+        min=1,
+        max=1,
+        accepted_queue_size=1,
+        accepted_queue_timeout=0,
+        server=httpserver,
+    )
+
+    # Force simple_response to raise an unexpected exception
+    def boom(self, *args, **kwargs):
+        raise RuntimeError('simulated failure while sending 503')
+
+    monkeypatch.setattr(HTTPRequest, 'simple_response', boom)
+
+    httpserver.prepare()
+    serve_thread = threading.Thread(target=httpserver.serve, daemon=True)
+    serve_thread.start()
+    request.addfinalizer(httpserver.stop)
+
+    httpserver.requests.stop()
+    httpserver.requests._queue.put(None)
+
+    _host, port = httpserver.bind_addr
+    # The request will fail because of our boom, but the server thread
+    # should catch it and log it without crashing.
+    with pytest.raises(requests.exceptions.RequestException):
+        requests.get(f'http://{localhost}:{port}', timeout=5)
+
+    # Give the unservicable thread a moment to process
+    time.sleep(0.5)
+
+    captured = capsys.readouterr()
+    assert 'simulated failure while sending 503' in captured.err
+    assert 'RuntimeError' in captured.err

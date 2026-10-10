@@ -29,9 +29,13 @@ class BufferedWriter(io.BufferedWriter):
             try:
                 # ssl sockets only except 'bytes', not bytearrays
                 # so perhaps we should conditionally wrap this for perf?
-                n = self.raw.write(bytes(self._write_buf))
+                to_write = bytes(self._write_buf[:SOCK_WRITE_BLOCKSIZE])
+                n = self.raw.write(to_write)
             except io.BlockingIOError as e:
                 n = e.characters_written
+            if n is None:
+                # No progress; avoid clearing the buffer
+                break
             del self._write_buf[:n]
 
 

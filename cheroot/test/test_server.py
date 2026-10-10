@@ -20,7 +20,7 @@ import requests_unixsocket
 from pypytools.gc.custom import DefaultGc
 
 from .._compat import IS_LINUX, IS_MACOS, IS_WINDOWS, SYS_PLATFORM, bton, ntob
-from ..server import IS_UID_GID_RESOLVABLE, Gateway, HTTPServer
+from ..server import IS_UID_GID_RESOLVABLE, Gateway, HTTPServer, HTTPRequest, _STOPPING_FOR_INTERRUPT
 from ..testing import (
     ANY_INTERFACE_IPV4,
     ANY_INTERFACE_IPV6,
@@ -626,3 +626,35 @@ def test_overload_thread_does_not_leak():
     # We use special exit code to indicate success, rather than normal zero, so
     # the test doesn't acidentally pass:
     assert process.returncode == SUCCESSFUL_SUBPROCESS_EXIT
+
+
+
+
+
+def test_unservicable_logs_unexpected_errors(mocker):
+    """Unexpected errors in _serve_unservicable are logged via self.error_log."""
+    httpserver = HTTPServer(
+        bind_addr=('127.0.0.1', 0),
+        gateway=Gateway,
+    )
+    httpserver.ready = True
+
+    # Mock a connection
+    mock_conn = mocker.Mock()
+    mock_conn.linger = False
+
+    # Put one connection then the stop sentinel
+    httpserver._unservicable_conns = mocker.Mock()
+    calls = [mock_conn, _STOPPING_FOR_INTERRUPT]
+    def get_side():
+        return calls.pop(0)
+    httpserver._unservicable_conns.get.side_effect = get_side
+
+    # Make simple_response raise a generic Exception
+    mocker.patch.object(HTTPRequest, 'simple_response', side_effect=Exception('boom'))
+    mock_error_log = mocker.patch.object(httpserver, 'error_log')
+
+    httpserver._serve_unservicable()
+
+    mock_error_log.assert_called_once()
+    assert 'boom' in str(mock_error_log.call_args)
